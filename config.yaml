@@ -1,0 +1,43 @@
+audio:
+  sample_rate: 16000
+  capture_sink: call4me_capture
+  tts_sink: call4me_tts
+  microphone_source: call4me_mic
+  process_interval_sec: 1.5
+  min_speech_duration_sec: 0.3
+  end_of_speech_silence_sec: 0.8
+  max_buffer_sec: 15.0
+  rms_silence_threshold: 0.002
+  parec_latency_ms: 50
+
+stt:
+  model_size: base
+  compute_type: int8
+  language: en
+  beam_size: 3
+  vad_threshold: 0.3
+
+tts:
+  model_path: models/en_US-amy-medium.onnx
+  output_dir: /tmp/call4me
+
+llm:
+  base_url: http://127.0.0.1:8000/v1
+  api_key: call4me
+  model: gpt-4.1-mini
+  temperature: 0.2
+  max_output_tokens: 180
+  stream: true
+
+browser:
+  cdp_url: http://127.0.0.1:9222
+  voice_url: https://voice.google.com/u/0/calls
+  timeout_ms: 30000
+  openclaw_tool_path: /home/ubuntu/scripts/openclaw-tool
+
+agent:
+  max_duration_sec: 1800
+  idle_timeout_sec: 120
+  transcript_history_limit: 20
+  on_hold_message_interval_sec: 300
+  auto_hangup_on_complete: true

@@ -1,0 +1,8 @@
+faster-whisper>=1.2.1
+numpy>=1.26
+openai>=1.14.0
+patchright>=1.52.0
+piper-tts>=1.4.1
+PyYAML>=6.0
+silero-vad>=6.2.1
+torch>=2.2
