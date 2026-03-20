@@ -212,6 +212,7 @@ venv/
 __pycache__/
 *.pyc
 .env
-docs/design.md
+docs/
+models/
 test/*.wav
 *.log
