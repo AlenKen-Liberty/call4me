@@ -20,7 +20,8 @@ def parse_action(content: str) -> LLMAction:
     upper = raw.upper()
 
     if upper.startswith("DTMF:"):
-        digit = raw.split(":", 1)[1].strip()
+        digit_str = raw.split(":", 1)[1].strip()
+        digit = digit_str[0] if digit_str else ""
         return LLMAction(kind="dtmf", raw=raw, digit=digit)
     if upper == "HOLD_WAIT":
         return LLMAction(kind="hold_wait", raw=raw)
@@ -36,10 +37,17 @@ class Chat2APIClient:
 
     def next_action(self, system_prompt: str, history: list[dict[str, str]]) -> LLMAction:
         messages = [{"role": "system", "content": system_prompt}, *history]
-        response = self._complete(messages)
+        response = self._complete_messages(messages)
         return parse_action(response)
 
-    def _complete(self, messages: list[dict[str, str]]) -> str:
+    def complete_text(self, prompt: str, system_prompt: str | None = None) -> str:
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return self._complete_messages(messages)
+
+    def _complete_messages(self, messages: list[dict[str, str]]) -> str:
         client = self._create_client()
         if self.config.stream:
             return self._stream_completion(client, messages)

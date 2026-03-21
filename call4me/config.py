@@ -67,6 +67,12 @@ class AgentConfig:
 
 
 @dataclass(slots=True)
+class MemoryConfig:
+    db_path: str = "data/memory.sqlite"
+    embed_model: str = "BAAI/bge-small-en-v1.5"
+
+
+@dataclass(slots=True)
 class Call4MeConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: STTConfig = field(default_factory=STTConfig)
@@ -74,6 +80,7 @@ class Call4MeConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Call4MeConfig":
@@ -84,6 +91,7 @@ class Call4MeConfig:
             llm=_merge_dataclass(LLMConfig, data.get("llm", {})),
             browser=_merge_dataclass(BrowserConfig, data.get("browser", {})),
             agent=_merge_dataclass(AgentConfig, data.get("agent", {})),
+            memory=_merge_dataclass(MemoryConfig, data.get("memory", {})),
         )
 
 

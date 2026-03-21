@@ -214,5 +214,6 @@ __pycache__/
 .env
 docs/
 models/
+data/
 test/*.wav
 *.log

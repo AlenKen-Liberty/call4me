@@ -1,8 +1,10 @@
 faster-whisper>=1.2.1
+fastembed>=0.3.6
 numpy>=1.26
 openai>=1.14.0
 patchright>=1.52.0
 piper-tts>=1.4.1
 PyYAML>=6.0
+rank-bm25>=0.2.2
 silero-vad>=6.2.1
 torch>=2.2

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ from call4me.audio import PulseAudioManager, PulseAudioPlayback
 from call4me.browser import GoogleVoiceController
 from call4me.config import Call4MeConfig
 from call4me.llm import Chat2APIClient
+from call4me.memory import CallMemoryService, PostCallExtractor
 from call4me.prompts import TaskPrompt, build_system_prompt
 from call4me.stt import TranscriptEvent, WhisperStreamingTranscriber
 from call4me.tts import PiperTTS
@@ -20,6 +22,7 @@ class CallRequest:
     phone_number: str
     task_prompt: TaskPrompt
     user_info: dict[str, str] = field(default_factory=dict)
+    company: str = ""
     interactive: bool = False
     max_duration_sec: int | None = None
 
@@ -28,6 +31,9 @@ class CallRequest:
 class CallResult:
     completed: bool
     summary: str
+    company: str
+    duration_sec: int
+    ivr_steps: list[str]
     transcripts: list[TranscriptEvent]
 
 
@@ -41,20 +47,33 @@ class Call4MeAgent:
         self.llm = Chat2APIClient(config.llm)
         self.browser = GoogleVoiceController(config.browser)
         self.stt = WhisperStreamingTranscriber(config.audio, config.stt)
+        self.memory = CallMemoryService(
+            db_path=config.memory.db_path,
+            embed_model=config.memory.embed_model,
+        )
+        self.extractor = PostCallExtractor(self.llm, self.memory, self.logger)
 
     def run(self, request: CallRequest) -> CallResult:
         transcripts: list[TranscriptEvent] = []
         history: list[dict[str, str]] = []
+        ivr_steps: list[str] = []
         transcript_queue: "queue.Queue[TranscriptEvent]" = queue.Queue()
         stop_event = threading.Event()
         completed = False
         summary = ""
         hold_active = False
+        company = self._resolve_company(request)
         last_activity = time.monotonic()
         last_hold_log = time.monotonic()
         max_duration = request.max_duration_sec or self.config.agent.max_duration_sec
-        deadline = time.monotonic() + max_duration
-        system_prompt = build_system_prompt(request.task_prompt, request.user_info)
+        start_time = time.monotonic()
+        deadline = start_time + max_duration
+        memory_context = self.memory.get_context_for_call(company, request.task_prompt.task)
+        system_prompt = build_system_prompt(
+            request.task_prompt,
+            request.user_info,
+            memory_context=memory_context,
+        )
 
         self.pulse.ensure_devices()
         self.browser.connect()
@@ -110,6 +129,7 @@ class Call4MeAgent:
 
                 if action.kind == "dtmf":
                     self.browser.press_key(action.digit)
+                    ivr_steps.append(action.digit)
                     continue
                 if action.kind == "hold_wait":
                     hold_active = True
@@ -131,7 +151,24 @@ class Call4MeAgent:
             thread.join(timeout=5)
             self.browser.close()
 
-        return CallResult(completed=completed, summary=summary, transcripts=transcripts)
+        return CallResult(
+            completed=completed,
+            summary=summary,
+            company=company,
+            duration_sec=int(time.monotonic() - start_time),
+            ivr_steps=ivr_steps,
+            transcripts=transcripts,
+        )
+
+    def learn_from_result(self, request: CallRequest, result: CallResult) -> None:
+        self.extractor.extract_and_save(
+            company=result.company,
+            phone=request.phone_number,
+            task=request.task_prompt.task,
+            transcripts=result.transcripts,
+            result=result,
+            ivr_steps=result.ivr_steps,
+        )
 
     @staticmethod
     def _looks_like_hold_prompt(text: str) -> bool:
@@ -144,3 +181,13 @@ class Call4MeAgent:
             "representative will be with you",
         )
         return any(marker in normalized for marker in hold_markers)
+
+    def _resolve_company(self, request: CallRequest) -> str:
+        explicit = request.company.strip() or request.user_info.get("company", "").strip()
+        if explicit:
+            return explicit
+
+        digits = re.sub(r"\D", "", request.phone_number)
+        if digits:
+            return f"number_{digits}"
+        return "unknown_company"

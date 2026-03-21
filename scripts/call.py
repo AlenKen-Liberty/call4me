@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--number", required=True, help="Destination phone number")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"), help="Path to config.yaml")
     parser.add_argument("--template", default="general", choices=["general", "flight_change", "price_inquiry"])
+    parser.add_argument("--company", help="Company name for memory lookup and post-call learning")
     parser.add_argument("--task", help="Task description")
     parser.add_argument("--goal", help="Goal description")
     parser.add_argument("--context", default="", help="Extra context for the agent")
@@ -102,15 +103,21 @@ def main() -> int:
         if args.max_duration:
             config.agent.max_duration_sec = args.max_duration
 
+        agent = Call4MeAgent(config)
         request = CallRequest(
             phone_number=args.number,
             task_prompt=build_task_prompt(args),
             user_info=build_user_info(args),
+            company=args.company or "",
             interactive=args.interactive,
             max_duration_sec=args.max_duration,
         )
 
-        result = Call4MeAgent(config).run(request)
+        result = agent.run(request)
+        try:
+            agent.learn_from_result(request, result)
+        except Exception as exc:
+            logging.warning("Post-call memory extraction failed: %s", exc)
     except (RuntimeError, ValueError) as exc:
         logging.error(str(exc))
         return 2

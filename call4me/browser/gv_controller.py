@@ -66,9 +66,11 @@ class GoogleVoiceController:
                 f'button:has-text("{digit}")',
             ]
         )
-        if key is None:
-            raise RuntimeError(f"Unable to find keypad digit {digit}")
-        key.click()
+        if key is not None:
+            key.click()
+        else:
+            # Fallback to pure keyboard press
+            self.page.keyboard.press(digit)
 
     def hangup(self) -> bool:
         hangup_button = self._query_first(
