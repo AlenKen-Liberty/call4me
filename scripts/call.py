@@ -11,15 +11,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from call4me import Call4MeAgent, CallRequest, load_config
-from call4me.prompts import render_task_prompt
+from call4me.cli import InteractiveCLI
+from call4me.planner import Interviewer, ScriptGenerator
+from call4me.prompts import TaskPrompt, render_task_prompt
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Call4Me phone automation CLI")
-    parser.add_argument("--number", required=True, help="Destination phone number")
+    parser.add_argument("--number", help="Destination phone number")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"), help="Path to config.yaml")
     parser.add_argument("--template", default="general", choices=["general", "flight_change", "price_inquiry"])
     parser.add_argument("--company", help="Company name for memory lookup and post-call learning")
+    parser.add_argument("--contact-name", help="Who is expected to answer the phone")
     parser.add_argument("--task", help="Task description")
     parser.add_argument("--goal", help="Goal description")
     parser.add_argument("--context", default="", help="Extra context for the agent")
@@ -33,11 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--product-or-service", help="Target product or service for price inquiry")
     parser.add_argument("--questions", help="Questions to ask during a price inquiry")
     parser.add_argument("--max-duration", type=int, help="Override max call duration in seconds")
-    parser.add_argument("--interactive", action="store_true", help="Reserved flag for future live guidance support")
+    parser.add_argument("--interactive", action="store_true", help="Run the pre-call interview and live interactive CLI")
     return parser
 
 
-def build_task_prompt(args: argparse.Namespace):
+def build_task_prompt(args: argparse.Namespace) -> TaskPrompt:
     if args.template == "general":
         task = args.task or args.goal
         if not task:
@@ -82,6 +85,105 @@ def build_user_info(args: argparse.Namespace) -> dict[str, str]:
     return user_info
 
 
+def build_interactive_request(args: argparse.Namespace, agent: Call4MeAgent) -> CallRequest:
+    cli = InteractiveCLI()
+    cli.show_banner("Call4Me Interactive Planner")
+
+    phone_number = args.number or cli.ask_question("要拨打的电话号码是？")
+    company = args.company or cli.ask_question("公司或机构名称是？")
+    contact_name = args.contact_name or company or "customer service"
+    user_name = args.name or cli.ask_question("对方问起时，我应该怎么自我介绍？")
+    purpose = args.task or args.goal or cli.ask_question("这通电话的核心目标是什么？")
+
+    interviewer = Interviewer(agent.llm, agent.memory)
+    plan = interviewer.interview(
+        phone_number=phone_number,
+        contact_name=contact_name,
+        user_name=user_name,
+        company=company,
+        initial_purpose=purpose,
+        ask_fn=cli.ask_question,
+    )
+    cli.show_plan(plan.summary())
+
+    generator = ScriptGenerator(agent.llm, agent.memory)
+    cli.show_status("Generating script options...")
+    options = generator.generate_options(plan, count=3)
+    cli.show_script_options(
+        [
+            (idx, script.name or f"Option {idx}", script.description or "")
+            for idx, script in enumerate(options, start=1)
+        ]
+    )
+
+    default_index = 1
+    choice_raw = cli.ask_confirmation("选择脚本 1/2/3，直接回车默认 1")
+    choice_index = default_index
+    if choice_raw.strip():
+        try:
+            parsed = int(choice_raw)
+            if parsed < 1 or parsed > len(options):
+                raise ValueError("Invalid script option selected")
+            choice_index = parsed
+        except ValueError:
+            choice_index = default_index
+
+    selected_script = options[choice_index - 1]
+    cli.show_script(selected_script.to_display())
+    confirm = cli.ask_confirmation("确认开始拨号？[Y/n]")
+    if confirm.strip().lower() in {"n", "no"}:
+        raise ValueError("Call cancelled by user")
+
+    task_prompt = task_prompt_from_plan(plan)
+    user_info = build_user_info(args)
+    user_info.setdefault("name", user_name)
+    user_info.setdefault("company", company)
+    for key, value in plan.key_info.items():
+        if value:
+            user_info[key] = value
+    if plan.special_instructions:
+        user_info["special_instructions"] = plan.special_instructions
+
+    return CallRequest(
+        phone_number=phone_number,
+        task_prompt=task_prompt,
+        user_info=user_info,
+        company=company,
+        call_script=selected_script,
+        cli=cli,
+        interactive=True,
+        max_duration_sec=args.max_duration,
+    )
+
+
+def task_prompt_from_plan(plan) -> TaskPrompt:
+    context_lines = [f"Tone: {plan.tone}"]
+    for key, value in plan.key_info.items():
+        context_lines.append(f"{key}: {value}")
+    if plan.special_instructions:
+        context_lines.append(f"Special instructions: {plan.special_instructions}")
+
+    return render_task_prompt(
+        "general",
+        task=plan.purpose,
+        goal=plan.purpose,
+        context="\n".join(context_lines),
+    )
+
+
+def build_standard_request(args: argparse.Namespace) -> CallRequest:
+    if not args.number:
+        raise ValueError("--number is required unless you use --interactive and answer it there")
+    return CallRequest(
+        phone_number=args.number,
+        task_prompt=build_task_prompt(args),
+        user_info=build_user_info(args),
+        company=args.company or "",
+        interactive=args.interactive,
+        max_duration_sec=args.max_duration,
+    )
+
+
 def _required(value: str | None, flag: str) -> str:
     if not value:
         raise ValueError(f"{flag} is required for this template")
@@ -104,14 +206,7 @@ def main() -> int:
             config.agent.max_duration_sec = args.max_duration
 
         agent = Call4MeAgent(config)
-        request = CallRequest(
-            phone_number=args.number,
-            task_prompt=build_task_prompt(args),
-            user_info=build_user_info(args),
-            company=args.company or "",
-            interactive=args.interactive,
-            max_duration_sec=args.max_duration,
-        )
+        request = build_interactive_request(args, agent) if args.interactive else build_standard_request(args)
 
         result = agent.run(request)
         try:

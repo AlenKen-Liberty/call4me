@@ -21,9 +21,44 @@ class WhisperStreamingTranscriber:
     def __init__(self, audio_config: AudioConfig, stt_config: STTConfig):
         self.audio_config = audio_config
         self.stt_config = stt_config
+        self._models = None
+
+    def warmup(self) -> None:
+        """Pre-load models and run multiple warmup transcriptions to fully heat CPU caches."""
+        import logging
+        logger = logging.getLogger("call4me")
+        logger.info("Warming up STT models...")
+        t0 = time.time()
+        np, torch, whisper_model, vad_model, get_speech_timestamps = self._load_models()
+        self._models = (np, torch, whisper_model, vad_model, get_speech_timestamps)
+
+        # Generate synthetic speech-like audio (sine sweeps) instead of silence
+        # This exercises the same code paths as real speech
+        sr = self.audio_config.sample_rate
+        for i in range(3):
+            t = np.linspace(0, 1.5, int(sr * 1.5), dtype=np.float32)
+            # Mix of frequencies that mimic speech formants
+            dummy = (
+                0.3 * np.sin(2 * np.pi * (200 + i * 100) * t) +
+                0.2 * np.sin(2 * np.pi * (800 + i * 200) * t) +
+                0.1 * np.sin(2 * np.pi * (2000 + i * 300) * t) +
+                np.random.randn(len(t)).astype(np.float32) * 0.05
+            ).astype(np.float32)
+            segments, _ = whisper_model.transcribe(
+                dummy,
+                beam_size=self.stt_config.beam_size,
+                language=self.stt_config.language,
+                vad_filter=False,
+            )
+            list(segments)  # consume the generator
+
+        logger.info("STT warmup done in %.1fs (%d warmup runs)", time.time() - t0, 3)
 
     def run_loop(self, stop_event: Event, output_queue: "queue.Queue[TranscriptEvent]") -> None:
-        np, torch, whisper_model, vad_model, get_speech_timestamps = self._load_models()
+        if self._models is not None:
+            np, torch, whisper_model, vad_model, get_speech_timestamps = self._models
+        else:
+            np, torch, whisper_model, vad_model, get_speech_timestamps = self._load_models()
 
         chunk_bytes = self.audio_config.sample_rate * 2 // 10
         max_buffer_samples = int(self.audio_config.max_buffer_sec * self.audio_config.sample_rate)

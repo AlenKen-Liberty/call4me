@@ -45,16 +45,9 @@ class GoogleVoiceController:
         dialpad.fill(phone_number)
         time.sleep(1.0)
 
-        call_button = self._query_first(
-            [
-                'button[aria-label="Call"]',
-                'button[aria-label*="Call"]',
-            ]
-        )
-        if call_button is not None:
-            call_button.click()
-        else:
-            dialpad.press("Enter")
+        # Press Enter to dial the number we typed — avoids clicking
+        # on suggestion buttons like "Call Air Canada" from call history.
+        dialpad.press("Enter")
         return True
 
     def press_key(self, digit: str) -> None:
@@ -82,7 +75,11 @@ class GoogleVoiceController:
         )
         if hangup_button is None:
             return False
-        hangup_button.click()
+        try:
+            hangup_button.click()
+        except Exception:
+            # The other side may have already hung up
+            return False
         return True
 
     def is_call_active(self) -> bool:

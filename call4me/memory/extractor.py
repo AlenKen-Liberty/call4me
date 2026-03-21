@@ -32,6 +32,8 @@ class PostCallExtractor:
                         "You extract structured learnings from customer service transcripts. "
                         "Return valid JSON only."
                     ),
+                    max_output_tokens=800,
+                    temperature=0.2,
                 )
                 payload = self._parse_json(response)
             except Exception as exc:
