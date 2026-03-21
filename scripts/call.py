@@ -210,23 +210,17 @@ def main() -> int:
         call4me_logger.setLevel(logging.INFO)
 
         class _QuietFilter(logging.Filter):
-            # Patterns to suppress during interactive mode
+            # Pre-call INFO patterns to suppress (e.g. HTTP traffic, dedup details).
+            # During the actual call, agent.py raises the level to WARNING so
+            # no INFO reaches this filter at all.
             _noise = (
-                "HTTP Request:", "HTTP/", "Speculative cache:", "Pre-cached [",
-                "Cache HIT", "Dedup [", "Processing audio", "Pre-cached %d",
-                "Generated script:", "Decision ", "No key decisions",
-                "Running call", "Call completed", "Interviewed",
-                "Speculative cache failed", "Speculation failed",
-                "Still on hold", "No new transcripts", "Warming up STT",
-                "STT warmup done", "Moved ", "Drained pre-call",
-                "Cached: "
+                "HTTP Request:", "HTTP/", "Dedup [",
+                "DeprecationWarning",
             )
             def filter(self, record: logging.LogRecord) -> bool:
-                msg = record.getMessage()
-                # Suppress INFO-level logs matching our noise patterns
                 if record.levelno == logging.INFO:
+                    msg = record.getMessage()
                     return not any(n in msg for n in self._noise)
-                # Allow WARNING, ERROR, CRITICAL
                 return True
 
         for handler in logging.root.handlers:

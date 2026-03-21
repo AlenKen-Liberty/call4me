@@ -49,6 +49,11 @@ When ready, output EXACTLY this JSON (no other text):
 
 - Extract ALL factual details (addresses, account numbers, plan types, dates)
   into key_info.
+- SECURITY: NEVER put the user's real personal phone number, email, SSN, or
+  date of birth into key_info unless the user explicitly says to share it
+  during the call. The phone_number field is the TARGET number to dial, not
+  the user's own number. If the call plan doesn't include a callback number,
+  don't invent one here — the bot will handle it at runtime.
 - Respond in the same language the user uses for the conversation.
 - BUT: the "purpose", "key_info" values, and "special_instructions" in the
   JSON MUST be in English — they will be used during an English phone call.

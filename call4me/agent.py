@@ -129,6 +129,11 @@ class Call4MeAgent:
                 break
         self.logger.info("Drained pre-call transcripts, STT model is hot")
 
+        # In interactive mode, suppress all INFO logs once the actual call starts.
+        # Pre-call logs (warmup, pre-cache, audio setup) are still visible above.
+        if request.interactive:
+            logging.getLogger("call4me").setLevel(logging.WARNING)
+
         try:
             while time.monotonic() < deadline:
                 pending_override, stop_requested = self._drain_user_commands(
@@ -233,12 +238,24 @@ class Call4MeAgent:
                     if request.cli:
                         request.cli.show_us(action.text, source="bot")
                     self.tts.speak(action.text)
+
+                    # If the LLM combined speech with CALL_DONE, finish after speaking
+                    if action.pending_done:
+                        completed = True
+                        summary = action.pending_done
+                        if self.config.agent.auto_hangup_on_complete:
+                            self.browser.hangup()
+                        break
+
                     if speculative_cache and not self._looks_like_ivr_prompt(event.text):
                         speculative_cache.speculate_async(history, event.text)
 
             if not summary:
                 summary = "Call finished without a final summary."
         finally:
+            # Restore INFO logging for post-call processing
+            if request.interactive:
+                logging.getLogger("call4me").setLevel(logging.INFO)
             stop_event.set()
             thread.join(timeout=5)
             if speculative_cache is not None:

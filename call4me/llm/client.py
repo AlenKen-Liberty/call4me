@@ -13,6 +13,7 @@ class LLMAction:
     text: str = ""
     digit: str = ""
     summary: str = ""
+    pending_done: str = ""  # CALL_DONE summary when speech precedes it
 
 
 def parse_action(content: str) -> LLMAction:
@@ -31,12 +32,16 @@ def parse_action(content: str) -> LLMAction:
 
     # Handle mixed response: LLM sometimes combines speech + action marker
     # e.g. "Got it, thanks.\nCALL_DONE:summary here"
-    # Extract only the speech part before any action marker.
+    # Extract the speech part AND preserve the action marker.
     speech = raw
+    pending_done = ""
     for marker in ("CALL_DONE:", "DTMF:", "HOLD_WAIT"):
         idx = raw.upper().find(marker)
         if idx > 0:
             speech = raw[:idx].strip()
+            # Preserve CALL_DONE summary so the caller can act on it after speaking
+            if marker == "CALL_DONE:":
+                pending_done = raw[idx + len("CALL_DONE:"):].strip()
             break
 
     # Strip any internal reasoning / meta-commentary that leaks through
@@ -48,7 +53,7 @@ def parse_action(content: str) -> LLMAction:
 
     if not speech:
         return LLMAction(kind="hold_wait", raw=raw)
-    return LLMAction(kind="speak", raw=raw, text=speech)
+    return LLMAction(kind="speak", raw=raw, text=speech, pending_done=pending_done)
 
 
 class Chat2APIClient:

@@ -65,6 +65,7 @@ class SpeculativeCache:
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
+        self._recent_responses: list[str] = []  # last N responses used, to avoid repeats
 
     def precache_script(self, script: CallScript) -> int:
         """Pre-generate TTS for unique responses in the script. Returns count.
@@ -131,6 +132,7 @@ class SpeculativeCache:
         """Try to match what we heard against cached responses.
 
         Returns (response_text, wav_path) if a match is found.
+        Skips responses used in the last 3 turns to avoid repetition.
         """
         heard_norm = self._normalize_text(heard)
         heard_words = set(heard_norm.split())
@@ -140,12 +142,21 @@ class SpeculativeCache:
 
         with self._lock:
             for trigger_key, (response, wav) in self._cache.items():
+                # Skip responses we've recently used
+                resp_norm = self._normalize_text(response)
+                if resp_norm in self._recent_responses:
+                    continue
                 score = self._match_score(heard_norm, heard_words, trigger_key)
                 if score > best_score and score >= 0.55:
                     best_score = score
                     best_match = (response, wav)
 
         if best_match:
+            # Track this response to avoid reusing it soon
+            resp_norm = self._normalize_text(best_match[0])
+            self._recent_responses.append(resp_norm)
+            if len(self._recent_responses) > 3:
+                self._recent_responses.pop(0)
             logger.info(
                 "Cache HIT (score=%.2f): heard=%r -> response=%r",
                 best_score, heard[:50], best_match[0][:50],

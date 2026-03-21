@@ -38,6 +38,14 @@ Generate a JSON object with this structure:
   "fallback_strategy": "what to do if nothing matches"
 }}
 
+SECURITY (mandatory):
+- NEVER include real phone numbers, emails, SSNs, dates of birth, or credit
+  card numbers in any response. If the script needs a callback number, use
+  the local area code plus made-up digits (e.g. 919-555-XXXX for NC).
+- Only use information explicitly provided in the call plan above.
+- If a scenario requires info not in the plan, the response should say
+  "I don't have that with me right now" or similar.
+
 Rules:
 - Generate 2-3 opening scenarios
 - Generate 3-5 mid-call scenarios (likely obstacles, questions, objections)
@@ -57,6 +65,16 @@ Rules:
 - ALL responses MUST be in English. These will be spoken aloud via TTS on
   an English-language phone call. Never generate responses in any other
   language, regardless of what language the plan description is written in.
+- NUMBER PRONUNCIATION: Write numbers as humans say them on the phone.
+  Street numbers: '1031' → 'ten thirty-one'. Phone numbers: group as
+  three-three-four with commas: '786, 874, 4562'. Zip codes: each digit
+  separately: '2 7 5 1 1'. Never write raw digit strings like '1031'.
+- NAME: Introduce yourself by a single first name. Never say "I am
+  [someone]'s assistant". Just use the caller's name directly.
+- Ask ONE question per response. Never stack 3-4 questions together.
+- Avoid generic filler responses like "Okay, thank you for checking" as the
+  response for multiple nodes. Each scenario should have a SPECIFIC next
+  question or acknowledgment that advances the conversation goal.
 - Output ONLY the JSON, no markdown fences
 """
 
