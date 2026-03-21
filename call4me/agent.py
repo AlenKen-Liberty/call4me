@@ -48,7 +48,9 @@ class Call4MeAgent:
         self.pulse = PulseAudioManager(config.audio)
         self.playback = PulseAudioPlayback(config.audio)
         self.tts = PiperTTS(config.tts, self.playback)
-        self.llm = Chat2APIClient(config.llm)
+        self.llm = Chat2APIClient(config.llm)  # fast model for real-time calls
+        # Smarter model for pre-call planning (falls back to llm if not configured)
+        self.planner_llm = Chat2APIClient(config.planner_llm) if config.planner_llm else self.llm
         self.browser = GoogleVoiceController(config.browser)
         self.stt = WhisperStreamingTranscriber(config.audio, config.stt)
         self.memory = CallMemoryService(

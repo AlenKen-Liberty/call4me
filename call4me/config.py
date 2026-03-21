@@ -78,17 +78,22 @@ class Call4MeConfig:
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    planner_llm: LLMConfig | None = None  # slower/smarter model for pre-call planning
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Call4MeConfig":
+        planner_llm = None
+        if "planner_llm" in data:
+            planner_llm = _merge_dataclass(LLMConfig, data["planner_llm"])
         return cls(
             audio=_merge_dataclass(AudioConfig, data.get("audio", {})),
             stt=_merge_dataclass(STTConfig, data.get("stt", {})),
             tts=_merge_dataclass(TTSConfig, data.get("tts", {})),
             llm=_merge_dataclass(LLMConfig, data.get("llm", {})),
+            planner_llm=planner_llm,
             browser=_merge_dataclass(BrowserConfig, data.get("browser", {})),
             agent=_merge_dataclass(AgentConfig, data.get("agent", {})),
             memory=_merge_dataclass(MemoryConfig, data.get("memory", {})),

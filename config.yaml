@@ -29,6 +29,17 @@ llm:
   max_output_tokens: 180
   stream: true
 
+# Smarter model for pre-call planning (interviewer, script generation).
+# No time pressure — quality matters more than speed here.
+# Falls back to llm if not configured.
+planner_llm:
+  base_url: http://127.0.0.1:7860/v1
+  api_key: call4me
+  model: codex
+  temperature: 0.2
+  max_output_tokens: 2000
+  stream: false
+
 browser:
   cdp_url: http://127.0.0.1:9222
   voice_url: https://voice.google.com/u/0/calls

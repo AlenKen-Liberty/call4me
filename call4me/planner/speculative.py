@@ -67,23 +67,65 @@ class SpeculativeCache:
         self._stop = threading.Event()
 
     def precache_script(self, script: CallScript) -> int:
-        """Pre-generate TTS for all nodes in the script. Returns count."""
+        """Pre-generate TTS for unique responses in the script. Returns count.
+
+        Deduplicates by response content — if two nodes say essentially the
+        same thing, only one WAV is generated.  The trigger mapping still
+        covers both so either can match.
+        """
         self.script = script
         count = 0
+        # response_norm -> (wav_path, original_text)
+        seen_responses: dict[str, tuple[Path, str]] = {}
+
         for node in script.all_nodes():
-            if not node.response.strip():
+            resp = node.response.strip()
+            if not resp:
                 continue
-            try:
-                wav = self.tts.synthesize(node.response)
-                node.cached_wav = str(wav)
+
+            resp_norm = self._normalize_text(resp)
+
+            # Check for near-duplicate responses (>70% word overlap)
+            dup_wav = self._find_duplicate(resp_norm, seen_responses)
+            if dup_wav is not None:
+                node.cached_wav = str(dup_wav)
                 with self._lock:
                     key = self._normalize_trigger(node.trigger)
-                    self._cache[key] = (node.response, wav)
+                    self._cache[key] = (resp, dup_wav)
+                logger.debug("Dedup [%s]: reusing WAV for: %s", node.id, resp[:40])
+                continue
+
+            try:
+                wav = self.tts.synthesize(resp)
+                node.cached_wav = str(wav)
+                seen_responses[resp_norm] = (wav, resp)
+                with self._lock:
+                    key = self._normalize_trigger(node.trigger)
+                    self._cache[key] = (resp, wav)
                 count += 1
-                logger.info("Pre-cached [%s]: %s", node.id, node.response[:60])
+                logger.info("Pre-cached [%s]: %s", node.id, resp[:60])
             except Exception as exc:
                 logger.warning("Failed to cache node %s: %s", node.id, exc)
         return count
+
+    @staticmethod
+    def _find_duplicate(
+        resp_norm: str, seen: dict[str, tuple[Path, str]]
+    ) -> Path | None:
+        """Return the WAV path if resp_norm is >60% similar to something seen."""
+        resp_words = set(resp_norm.split())
+        if not resp_words:
+            return None
+        for existing_norm, (wav, _) in seen.items():
+            existing_words = set(existing_norm.split())
+            if not existing_words:
+                continue
+            overlap = resp_words & existing_words
+            union = resp_words | existing_words
+            similarity = len(overlap) / len(union) if union else 0
+            if similarity > 0.6:
+                return wav
+        return None
 
     def match(self, heard: str) -> tuple[str, Path] | None:
         """Try to match what we heard against cached responses.
@@ -99,7 +141,7 @@ class SpeculativeCache:
         with self._lock:
             for trigger_key, (response, wav) in self._cache.items():
                 score = self._match_score(heard_norm, heard_words, trigger_key)
-                if score > best_score and score >= 0.3:
+                if score > best_score and score >= 0.55:
                     best_score = score
                     best_match = (response, wav)
 

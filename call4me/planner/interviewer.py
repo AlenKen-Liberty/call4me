@@ -1,4 +1,4 @@
-"""Pre-call interviewer: LLM asks clarifying questions, builds a CallPlan."""
+"""Pre-call interviewer: LLM analyses what's known, asks ONLY what's missing."""
 
 from __future__ import annotations
 
@@ -13,32 +13,51 @@ from .script import CallPlan
 logger = logging.getLogger("call4me.planner")
 
 INTERVIEW_SYSTEM = """\
-You are a call-preparation assistant. The user wants to make a phone call and has
-given you some basic information. Your job is to ask SHORT, targeted follow-up
-questions to make sure the call goes smoothly.
+You are a call-preparation assistant.  The user wants to make a phone call.
+They have already provided some information — possibly everything you need.
 
-Rules:
-- Ask at most 3 questions total (fewer if the info is already sufficient).
-- Each question should be ONE line, direct and practical.
-- When you have enough info, output EXACTLY the JSON block below (no extra text):
+Your ONLY job: analyse what's given and decide whether anything critical is
+still missing or ambiguous.
+
+What counts as "critical":
+  - phone number (required)
+  - who we are calling (name or company)
+  - what we want to achieve on this call
+  - caller's own name (so the bot can introduce itself)
+
+If ALL of these are clear from the user's input, skip questions entirely and
+output the plan JSON immediately.
+
+If something is genuinely missing or ambiguous, ask ONE concise follow-up
+question that covers all gaps.  Never ask something the user already told you.
+
+When ready, output EXACTLY this JSON (no other text):
 
 ```json
 {
   "ready": true,
-  "purpose": "one-line purpose of the call",
-  "tone": "warm and friendly / professional / casual / etc.",
-  "key_info": {"key": "value", ...},
-  "special_instructions": "any special notes"
+  "phone_number": "digits only",
+  "contact_name": "who picks up",
+  "company": "company or relationship label",
+  "user_name": "caller name",
+  "purpose": "one-line goal",
+  "tone": "warm and friendly / professional / casual",
+  "key_info": {"address": "...", "plan": "...", ...},
+  "special_instructions": "any extra strategy notes"
 }
 ```
 
-- If the user says "skip" or "go", stop asking and output the JSON with what you have.
-- Always respond in the same language the user uses.
+- Extract ALL factual details (addresses, account numbers, plan types, dates)
+  into key_info.
+- Respond in the same language the user uses for the conversation.
+- BUT: the "purpose", "key_info" values, and "special_instructions" in the
+  JSON MUST be in English — they will be used during an English phone call.
+- If the user says "skip", "go", "ok", or "够了", produce the JSON immediately.
 """
 
 
 class Interviewer:
-    """Conducts a short Q&A with the user to build a complete CallPlan."""
+    """Analyses user input, asks only what's genuinely missing."""
 
     def __init__(self, llm: Chat2APIClient, memory: CallMemoryService | None = None):
         self.llm = llm
@@ -46,113 +65,113 @@ class Interviewer:
 
     def interview(
         self,
-        phone_number: str,
-        contact_name: str,
-        user_name: str,
-        company: str,
-        initial_purpose: str,
+        raw_input: str,
+        cli_hints: dict[str, str] | None = None,
         ask_fn: Callable[[str], str] | None = None,
-        max_rounds: int = 3,
+        max_rounds: int = 2,
     ) -> CallPlan:
-        """Run the interview loop and return a CallPlan.
+        """Analyse raw_input + CLI hints, ask follow-ups only if needed.
 
-        ``ask_fn`` is a callback that displays a question and returns the
-        user's answer.  If *None*, the interviewer skips Q&A and builds the
-        plan from whatever was provided.
+        ``cli_hints`` are pre-filled values from command-line flags.
+        ``ask_fn`` displays a question and returns the user's answer.
         """
-        # Seed memory context if available
-        memory_hint = ""
-        if self.memory:
-            memory_hint = self.memory.get_context_for_call(company, initial_purpose)
-
-        first_msg = self._build_initial_message(
-            phone_number, contact_name, user_name, company,
-            initial_purpose, memory_hint,
-        )
+        first_msg = self._build_message(raw_input, cli_hints or {})
 
         history: list[dict[str, str]] = [
             {"role": "user", "content": first_msg},
         ]
 
-        # If no ask_fn, skip interactive loop
+        # First LLM call — might already produce the plan
+        response = self.llm.complete_messages(
+            history,
+            system_prompt=INTERVIEW_SYSTEM,
+            max_output_tokens=600,
+            temperature=0.2,
+        )
+
+        plan = self._try_parse_plan(response)
+        if plan:
+            return plan
+
+        # LLM wants to ask a question — only if we have ask_fn
         if ask_fn is None:
-            return self._quick_plan(
-                phone_number, contact_name, user_name, company,
-                initial_purpose,
-            )
+            return self._force_plan(history, response)
 
         for _ in range(max_rounds):
-            response = self.llm.complete_messages(
-                history,
-                system_prompt=INTERVIEW_SYSTEM,
-                max_output_tokens=500,
-                temperature=0.3,
-            )
-
-            # Check if LLM is ready (JSON output)
-            plan = self._try_parse_plan(
-                response, phone_number, contact_name, user_name, company
-            )
-            if plan:
-                return plan
-
-            # Show question to user, get answer
             history.append({"role": "assistant", "content": response})
             answer = ask_fn(response)
             if not answer or answer.strip().lower() in ("skip", "go", "ok", "够了"):
                 break
-
             history.append({"role": "user", "content": answer})
 
-        # Final attempt: force LLM to produce the JSON
+            response = self.llm.complete_messages(
+                history,
+                system_prompt=INTERVIEW_SYSTEM,
+                max_output_tokens=600,
+                temperature=0.2,
+            )
+            plan = self._try_parse_plan(response)
+            if plan:
+                return plan
+
+        return self._force_plan(history, response)
+
+    def _force_plan(
+        self, history: list[dict[str, str]], last_response: str
+    ) -> CallPlan:
+        """Force LLM to produce the plan JSON from what it has."""
+        history.append({"role": "assistant", "content": last_response})
         history.append({
             "role": "user",
-            "content": "That's all the info I have. Please produce the plan JSON now.",
+            "content": "That's all I have. Produce the plan JSON now.",
         })
         response = self.llm.complete_messages(
             history,
             system_prompt=INTERVIEW_SYSTEM,
-            max_output_tokens=500,
-            temperature=0.2,
+            max_output_tokens=600,
+            temperature=0.1,
         )
-        plan = self._try_parse_plan(
-            response, phone_number, contact_name, user_name, company
-        )
+        plan = self._try_parse_plan(response)
         if plan:
             return plan
 
-        # Fallback: build from what we have
-        return self._quick_plan(
-            phone_number, contact_name, user_name, company, initial_purpose
+        # Last resort: extract whatever we can
+        return CallPlan(
+            phone_number="",
+            contact_name="customer service",
+            user_name="",
+            company="",
+            purpose="General call",
+            tone="friendly",
         )
 
-    def _build_initial_message(
-        self, phone_number: str, contact_name: str, user_name: str,
-        company: str, purpose: str, memory_hint: str,
-    ) -> str:
-        parts = [
-            f"I want to call {contact_name} at {phone_number}.",
-            f"My name is {user_name}.",
-            f"Purpose: {purpose}",
-        ]
-        if company:
-            parts.append(f"Company/Relationship: {company}")
-        if memory_hint:
-            parts.append(f"\nPast experience:\n{memory_hint}")
+    def _build_message(self, raw_input: str, cli_hints: dict[str, str]) -> str:
+        parts = [raw_input.strip()]
+
+        hint_lines: list[str] = []
+        for key, val in cli_hints.items():
+            if val and val.strip():
+                hint_lines.append(f"  {key}: {val}")
+        if hint_lines:
+            parts.append("\nAdditional info from command line:")
+            parts.extend(hint_lines)
+
+        if self.memory:
+            # Try to find company from the input for memory lookup
+            company = cli_hints.get("company", "")
+            if company:
+                ctx = self.memory.get_context_for_call(company, raw_input)
+                if ctx.strip():
+                    parts.append(f"\nPast experience:\n{ctx}")
+
         return "\n".join(parts)
 
     @staticmethod
-    def _try_parse_plan(
-        response: str, phone_number: str, contact_name: str,
-        user_name: str, company: str,
-    ) -> CallPlan | None:
-        # Try to extract JSON from the response
+    def _try_parse_plan(response: str) -> CallPlan | None:
         try:
-            # Look for ```json ... ``` block
             if "```json" in response:
                 json_str = response.split("```json")[1].split("```")[0].strip()
             elif "{" in response and "}" in response:
-                # Find the outermost JSON object
                 start = response.index("{")
                 end = response.rindex("}") + 1
                 json_str = response[start:end]
@@ -164,10 +183,10 @@ class Interviewer:
                 return None
 
             return CallPlan(
-                phone_number=phone_number,
-                contact_name=contact_name,
-                user_name=user_name,
-                company=company,
+                phone_number=data.get("phone_number", ""),
+                contact_name=data.get("contact_name", "customer service"),
+                user_name=data.get("user_name", ""),
+                company=data.get("company", ""),
                 purpose=data.get("purpose", "General call"),
                 tone=data.get("tone", "friendly"),
                 key_info=data.get("key_info", {}),
@@ -175,18 +194,3 @@ class Interviewer:
             )
         except (json.JSONDecodeError, ValueError, IndexError):
             return None
-
-    @staticmethod
-    def _quick_plan(
-        phone_number: str, contact_name: str, user_name: str,
-        company: str, purpose: str,
-    ) -> CallPlan:
-        """Build a plan directly without LLM Q&A."""
-        return CallPlan(
-            phone_number=phone_number,
-            contact_name=contact_name,
-            user_name=user_name,
-            company=company,
-            purpose=purpose,
-            tone="warm and friendly",
-        )

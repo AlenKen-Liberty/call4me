@@ -89,55 +89,58 @@ def build_interactive_request(args: argparse.Namespace, agent: Call4MeAgent) -> 
     cli = InteractiveCLI()
     cli.show_banner("Call4Me Interactive Planner")
 
-    phone_number = args.number or cli.ask_question("要拨打的电话号码是？")
-    company = args.company or cli.ask_question("公司或机构名称是？")
-    contact_name = args.contact_name or company or "customer service"
-    user_name = args.name or cli.ask_question("对方问起时，我应该怎么自我介绍？")
-    purpose = args.task or args.goal or cli.ask_question("这通电话的核心目标是什么？")
+    # Collect CLI hints (anything the user already provided via flags)
+    cli_hints: dict[str, str] = {}
+    if args.number:
+        cli_hints["phone_number"] = args.number
+    if args.company:
+        cli_hints["company"] = args.company
+    if args.contact_name:
+        cli_hints["contact_name"] = args.contact_name
+    if args.name:
+        cli_hints["user_name"] = args.name
+    if args.task:
+        cli_hints["task"] = args.task
+    if args.goal:
+        cli_hints["goal"] = args.goal
+    if args.context:
+        cli_hints["context"] = args.context
 
-    interviewer = Interviewer(agent.llm, agent.memory)
+    # ONE free-form input — user tells us everything in natural language
+    raw_input = cli.ask_question(
+        "请描述这通电话（号码、对象、目的等，说多少都行）："
+    )
+
+    # LLM analyses what's given, asks only what's genuinely missing
+    # Use the smarter planner LLM for pre-call work (no time pressure)
+    interviewer = Interviewer(agent.planner_llm, agent.memory)
     plan = interviewer.interview(
-        phone_number=phone_number,
-        contact_name=contact_name,
-        user_name=user_name,
-        company=company,
-        initial_purpose=purpose,
+        raw_input=raw_input,
+        cli_hints=cli_hints,
         ask_fn=cli.ask_question,
     )
     cli.show_plan(plan.summary())
 
-    generator = ScriptGenerator(agent.llm, agent.memory)
-    cli.show_status("Generating script options...")
-    options = generator.generate_options(plan, count=3)
-    cli.show_script_options(
-        [
-            (idx, script.name or f"Option {idx}", script.description or "")
-            for idx, script in enumerate(options, start=1)
-        ]
-    )
+    # Generate ONE script, then surface key decision points
+    generator = ScriptGenerator(agent.planner_llm, agent.memory)
+    cli.show_status("Generating call script...")
+    script = generator.generate(plan)
+    script = generator.get_decisions(script, ask_fn=cli.ask_question)
 
-    default_index = 1
-    choice_raw = cli.ask_confirmation("选择脚本 1/2/3，直接回车默认 1")
-    choice_index = default_index
-    if choice_raw.strip():
-        try:
-            parsed = int(choice_raw)
-            if parsed < 1 or parsed > len(options):
-                raise ValueError("Invalid script option selected")
-            choice_index = parsed
-        except ValueError:
-            choice_index = default_index
-
-    selected_script = options[choice_index - 1]
-    cli.show_script(selected_script.to_display())
+    cli.show_script(script.to_display())
     confirm = cli.ask_confirmation("确认开始拨号？[Y/n]")
     if confirm.strip().lower() in {"n", "no"}:
         raise ValueError("Call cancelled by user")
 
+    # Build the request
+    phone_number = plan.phone_number or args.number or ""
+    if not phone_number:
+        raise ValueError("No phone number provided")
+
     task_prompt = task_prompt_from_plan(plan)
     user_info = build_user_info(args)
-    user_info.setdefault("name", user_name)
-    user_info.setdefault("company", company)
+    user_info.setdefault("name", plan.user_name)
+    user_info.setdefault("company", plan.company)
     for key, value in plan.key_info.items():
         if value:
             user_info[key] = value
@@ -148,8 +151,8 @@ def build_interactive_request(args: argparse.Namespace, agent: Call4MeAgent) -> 
         phone_number=phone_number,
         task_prompt=task_prompt,
         user_info=user_info,
-        company=company,
-        call_script=selected_script,
+        company=plan.company,
+        call_script=script,
         cli=cli,
         interactive=True,
         max_duration_sec=args.max_duration,
@@ -194,11 +197,46 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    if args.interactive:
+        # In interactive mode, filter out noisy logs so the user only sees
+        # the conversation transcript shown by InteractiveCLI.
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="%(asctime)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+        # Keep call4me logger at INFO but add a filter for noise
+        call4me_logger = logging.getLogger("call4me")
+        call4me_logger.setLevel(logging.INFO)
+
+        class _QuietFilter(logging.Filter):
+            # Patterns to suppress during interactive mode
+            _noise = (
+                "HTTP Request:", "HTTP/", "Speculative cache:", "Pre-cached [",
+                "Cache HIT", "Dedup [", "Processing audio", "Pre-cached %d",
+                "Generated script:", "Decision ", "No key decisions",
+                "Running call", "Call completed", "Interviewed",
+                "Speculative cache failed", "Speculation failed",
+                "Still on hold", "No new transcripts", "Warming up STT",
+                "STT warmup done", "Moved ", "Drained pre-call",
+                "Cached: "
+            )
+            def filter(self, record: logging.LogRecord) -> bool:
+                msg = record.getMessage()
+                # Suppress INFO-level logs matching our noise patterns
+                if record.levelno == logging.INFO:
+                    return not any(n in msg for n in self._noise)
+                # Allow WARNING, ERROR, CRITICAL
+                return True
+
+        for handler in logging.root.handlers:
+            handler.addFilter(_QuietFilter())
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
 
     try:
         config = load_config(args.config)
@@ -217,7 +255,19 @@ def main() -> int:
         logging.error(str(exc))
         return 2
 
-    print(result.summary)
+    # Clear end-of-call status
+    cli = request.cli if hasattr(request, 'cli') and request.cli else None
+    if cli:
+        if result.completed:
+            cli.show_banner("CALL COMPLETED")
+        else:
+            cli.show_banner("CALL ENDED (goal not marked complete)")
+        print(f"  Summary: {result.summary}")
+        print(f"  Duration: {result.duration_sec}s")
+        if result.ivr_steps:
+            print(f"  IVR keys pressed: {' → '.join(result.ivr_steps)}")
+    else:
+        print(result.summary)
     return 0 if result.completed else 1
 
 

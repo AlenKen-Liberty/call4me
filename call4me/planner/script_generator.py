@@ -1,9 +1,10 @@
-"""Generate CallScript options from a CallPlan using LLM."""
+"""Generate ONE CallScript, then surface key decision points for the user."""
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import Callable
 
 from call4me.llm import Chat2APIClient
 from call4me.memory import CallMemoryService
@@ -13,160 +14,211 @@ logger = logging.getLogger("call4me.planner")
 
 SCRIPT_GEN_PROMPT = """\
 You are a conversation strategist. Given a phone-call plan, generate a
-practical conversation script as a JSON tree. The script should help the
-caller react quickly in realistic branches.
+practical conversation script as a JSON tree.
 
 Call plan:
 {plan_summary}
-
-Approach style:
-{approach_name}: {approach_description}
 
 {memory_hint}
 
 Generate a JSON object with this structure:
 {{
-  "name": "short option name",
-  "description": "one-line summary of the approach",
   "opening": [
     {{
       "id": "open_1",
-      "trigger": "how they might open the call",
-      "response": "what we should say back",
-      "notes": "strategy note",
-      "priority": 10,
-      "children": [
-        {{
-          "id": "open_1_a",
-          "trigger": "possible follow-up",
-          "response": "next reply",
-          "notes": "",
-          "priority": 10,
-          "children": []
-        }}
-      ]
-    }}
-  ],
-  "scenarios": [
-    {{
-      "id": "scenario_1",
-      "trigger": "description of what they might say",
-      "response": "what to say back",
-      "notes": "strategy note",
-      "priority": 5,
-      "children": []
-    }}
-  ],
-  "closing": [
-    {{
-      "id": "close_1",
-      "trigger": "Alright, bye / Talk to you later",
-      "response": "Thanks again. Have a good day.",
+      "trigger": "how they might answer",
+      "response": "what we say back",
       "notes": "",
-      "priority": 5,
-      "children": []
+      "priority": 10,
+      "children": [...]
     }}
   ],
+  "scenarios": [...],
+  "closing": [...],
   "fallback_strategy": "what to do if nothing matches"
 }}
 
 Rules:
 - Generate 2-3 opening scenarios
-- Generate 3-5 mid-call scenarios that cover likely obstacles, questions, and objections
+- Generate 3-5 mid-call scenarios (likely obstacles, questions, objections)
 - Generate 1-2 closing scenarios
-- Each response must be EXACTLY what would be spoken aloud
-- Keep responses SHORT (1-2 sentences max, like real phone talk)
-- Use the tone specified in the plan
-- Children represent follow-up exchanges within that branch
-- Max depth: 3 levels
-- Triggers should cover common variations (use "/" to separate alternatives)
-- Avoid hardcoding personal contexts unless they are explicitly in the plan
-- Output ONLY the JSON, no markdown fences, no extra text
+- Each response: EXACT spoken words, SHORT (1-2 sentences)
+- Children = follow-up exchanges, max depth 3
+- Triggers: use "/" to separate alternatives
+- INFORMATION MANAGEMENT: Collect required information (address, account number,
+  name, confirmation codes) in the OPENING phase only. Never ask for the same
+  information twice. Don't pre-emptively volunteer information already confirmed.
+- NEVER repeat the same information in multiple responses. If the caller's
+  address, name, or request needs to be stated, write it ONCE in the most
+  likely scenario. Other nodes that might also need it should say something
+  like "Sure, let me repeat that — " and reference the same core fact, but
+  do NOT generate multiple near-identical sentences just with different
+  phrasing.  Each response in the script must be meaningfully different.
+- ALL responses MUST be in English. These will be spoken aloud via TTS on
+  an English-language phone call. Never generate responses in any other
+  language, regardless of what language the plan description is written in.
+- Output ONLY the JSON, no markdown fences
 """
 
-SCRIPT_APPROACHES = [
-    ("Safe", "Polite, low-risk, concise, optimized for clarity and cooperation."),
-    ("Warm", "Friendly and human, with more rapport-building and empathy."),
-    ("Assertive", "Still polite, but more direct about the goal and next steps."),
+DECISIONS_PROMPT = """\
+You are reviewing a phone-call script for a user before they dial.
+
+Call purpose: {purpose}
+
+Here is the generated script:
+{script_json}
+
+Identify 1-3 KEY DECISION POINTS where a reasonable caller might want to
+choose between genuinely different approaches.  Only flag decisions where the
+two options would lead to meaningfully different conversations — do NOT flag
+routine exchanges (greetings, spelling addresses, saying goodbye).
+
+Good examples of real decisions:
+- "If they ask for account info: A) Say you're a new customer  B) Give a reference number"
+- "If they push an upsell: A) Decline firmly  B) Ask for details to compare"
+- "Opening strategy: A) State your request immediately  B) Ask about availability first"
+
+Bad examples (don't include these):
+- Different phrasings of the same information ("Hi it's David" vs "Hey this is David")
+- Whether to be polite (always be polite)
+
+Output a JSON array (no extra text):
+[
+  {{
+    "id": "decision_1",
+    "situation": "short description of the moment",
+    "option_a": "first approach (1 sentence)",
+    "option_b": "second approach (1 sentence)",
+    "default": "a"
+  }}
 ]
+
+If the script is straightforward and has no real decision points, output: []
+"""
 
 
 class ScriptGenerator:
-    """Uses LLM to generate a CallScript from a CallPlan."""
+    """Generates ONE script, surfaces key decisions for user choice."""
 
     def __init__(self, llm: Chat2APIClient, memory: CallMemoryService | None = None):
         self.llm = llm
         self.memory = memory
 
     def generate(self, plan: CallPlan) -> CallScript:
-        options = self.generate_options(plan, count=1)
-        return options[0]
-
-    def generate_options(self, plan: CallPlan, count: int = 3) -> list[CallScript]:
-        """Generate multiple script options for the user to choose from."""
+        """Generate a single script from the plan."""
         memory_hint = ""
         if self.memory:
             ctx = self.memory.get_context_for_call(plan.company, plan.purpose)
             if ctx.strip():
                 memory_hint = f"Past experience with this contact:\n{ctx}"
 
-        options: list[CallScript] = []
-        for idx, (name, description) in enumerate(SCRIPT_APPROACHES[: max(count, 1)]):
-            prompt = SCRIPT_GEN_PROMPT.format(
-                plan_summary=plan.summary(),
-                memory_hint=memory_hint,
-                approach_name=name,
-                approach_description=description,
-            )
-            raw = self.llm.complete_text(
-                prompt,
-                max_output_tokens=2000,
-                temperature=0.4,
-            )
-            script = self._parse_script(raw, plan, default_name=name, default_description=description)
-            if not script.name:
-                script.name = f"Option {idx + 1}: {name}"
-            if not script.description:
-                script.description = description
-            options.append(script)
-        return options
+        prompt = SCRIPT_GEN_PROMPT.format(
+            plan_summary=plan.summary(),
+            memory_hint=memory_hint,
+        )
+        raw = self.llm.complete_text(prompt, max_output_tokens=2000, temperature=0.3)
+        return self._parse_script(raw, plan)
 
-    def _parse_script(
+    def get_decisions(
         self,
-        raw: str,
-        plan: CallPlan,
-        default_name: str = "",
-        default_description: str = "",
+        script: CallScript,
+        ask_fn: Callable[[str], str] | None = None,
     ) -> CallScript:
-        """Parse the LLM output into a CallScript."""
+        """Identify key decision points in the script and ask the user.
+
+        Modifies script nodes in-place based on user choices.
+        If ask_fn is None, uses defaults.
+        """
+        script_json = json.dumps(
+            {
+                "opening": [n.to_dict() for n in script.opening],
+                "scenarios": [n.to_dict() for n in script.scenarios],
+                "closing": [n.to_dict() for n in script.closing],
+            },
+            ensure_ascii=False,
+        )
+
+        prompt = DECISIONS_PROMPT.format(
+            purpose=script.plan.purpose,
+            script_json=script_json[:3000],  # truncate if huge
+        )
+
+        raw = self.llm.complete_text(prompt, max_output_tokens=800, temperature=0.2)
+        decisions = self._parse_decisions(raw)
+
+        if not decisions:
+            logger.info("No key decisions found — script is straightforward")
+            return script
+
+        if ask_fn is None:
+            return script
+
+        # Present each decision to the user
+        for d in decisions:
+            question = (
+                f"Decision: {d['situation']}\n"
+                f"  A) {d['option_a']}\n"
+                f"  B) {d['option_b']}\n"
+                f"  (default: {d['default'].upper()})"
+            )
+            answer = ask_fn(question)
+            choice = answer.strip().lower() if answer else d["default"]
+            if choice not in ("a", "b"):
+                choice = d["default"]
+
+            # Apply the choice: ask LLM to adjust the relevant script node
+            chosen_text = d["option_a"] if choice == "a" else d["option_b"]
+            d["chosen"] = chosen_text
+            logger.info("Decision %s: user chose %s — %s", d["id"], choice, chosen_text)
+
+        # Regenerate affected nodes with the decisions applied
+        return self._apply_decisions(script, decisions)
+
+    def _apply_decisions(
+        self, script: CallScript, decisions: list[dict]
+    ) -> CallScript:
+        """Update script nodes based on user decisions."""
+        if not decisions:
+            return script
+
+        # Build a guidance string for system prompt augmentation
+        guidance_parts = []
+        for d in decisions:
+            if "chosen" in d:
+                guidance_parts.append(
+                    f"- When {d['situation']}: {d['chosen']}"
+                )
+        if guidance_parts:
+            extra = "\n".join(guidance_parts)
+            if script.fallback_strategy:
+                script.fallback_strategy += f"\nUser preferences:\n{extra}"
+            else:
+                script.fallback_strategy = f"User preferences:\n{extra}"
+
+        return script
+
+    def _parse_script(self, raw: str, plan: CallPlan) -> CallScript:
         try:
-            # Strip markdown fences if present
             if "```json" in raw:
                 raw = raw.split("```json")[1].split("```")[0].strip()
             elif "```" in raw:
                 raw = raw.split("```")[1].split("```")[0].strip()
-
             data = json.loads(raw)
         except (json.JSONDecodeError, IndexError) as exc:
             logger.warning("Failed to parse script JSON: %s", exc)
-            logger.debug("Raw LLM output: %s", raw[:500])
-            return self._fallback_script(plan, default_name, default_description)
+            return self._fallback_script(plan)
 
         try:
-            name = data.get("name", default_name)
-            description = data.get("description", default_description)
             opening = [ScriptNode.from_dict(n) for n in data.get("opening", [])]
             scenarios = [ScriptNode.from_dict(n) for n in data.get("scenarios", [])]
             closing = [ScriptNode.from_dict(n) for n in data.get("closing", [])]
             fallback = data.get("fallback_strategy", "")
         except (KeyError, TypeError) as exc:
             logger.warning("Script structure error: %s", exc)
-            return self._fallback_script(plan, default_name, default_description)
+            return self._fallback_script(plan)
 
         script = CallScript(
             plan=plan,
-            name=name,
-            description=description,
             opening=opening,
             scenarios=scenarios,
             closing=closing,
@@ -179,60 +231,44 @@ class ScriptGenerator:
         return script
 
     @staticmethod
-    def _fallback_script(
-        plan: CallPlan,
-        name: str = "Fallback",
-        description: str = "Minimal practical script.",
-    ) -> CallScript:
-        """Minimal fallback script if LLM generation fails."""
-        caller = plan.user_name or "the caller"
-        contact = plan.contact_name or plan.company or "the other party"
+    def _parse_decisions(raw: str) -> list[dict]:
+        try:
+            if "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+                if raw.startswith("json"):
+                    raw = raw[4:].strip()
+            data = json.loads(raw)
+            if not isinstance(data, list):
+                return []
+            return [
+                d for d in data
+                if all(k in d for k in ("id", "situation", "option_a", "option_b"))
+            ]
+        except (json.JSONDecodeError, KeyError):
+            return []
 
+    @staticmethod
+    def _fallback_script(plan: CallPlan) -> CallScript:
+        caller = plan.user_name or "the caller"
         opening = [
             ScriptNode(
                 id="open_1",
-                trigger="Hello / Hi / This is customer service / This is the person answering",
+                trigger="Hello / Hi / automated system",
                 response=f"Hi, this is {caller}. I'm calling about {plan.purpose}.",
                 priority=10,
-            ),
-            ScriptNode(
-                id="open_2",
-                trigger="Who is this?",
-                response=f"Hi, this is {caller}. I'm calling about {plan.purpose}.",
-                priority=5,
-            ),
-        ]
-        scenarios = [
-            ScriptNode(
-                id="scenario_1",
-                trigger="Can you explain what you need? / How can I help?",
-                response=f"Sure. I'm calling because {plan.purpose}.",
-                notes="State the goal clearly.",
-                priority=10,
-            ),
-            ScriptNode(
-                id="scenario_2",
-                trigger="I need to verify your identity / account / booking",
-                response="Of course. Let me provide the details you need.",
-                notes="Stay cooperative during verification.",
-                priority=8,
             ),
         ]
         closing = [
             ScriptNode(
                 id="close_1",
-                trigger="Bye / Talk later / Gotta go",
+                trigger="Bye / Talk later",
                 response="Thanks for your help. Have a good day.",
                 priority=5,
             ),
         ]
-
         return CallScript(
             plan=plan,
-            name=name,
-            description=description,
             opening=opening,
-            scenarios=scenarios,
             closing=closing,
-            fallback_strategy=f"Be {plan.tone}. If unsure, restate the goal: {plan.purpose}",
+            fallback_strategy=f"Be {plan.tone}. Goal: {plan.purpose}",
         )
