@@ -33,10 +33,11 @@ class GoogleVoiceController:
         return self._page
 
     def dial(self, phone_number: str) -> bool:
-        dialpad = self._query_first(['input[placeholder="Enter a name or number"]'])
+        self._dismiss_overlays()
+        dialpad = self._find_dial_input()
         if dialpad is None:
             self._open_calls_view()
-            dialpad = self._query_first(['input[placeholder="Enter a name or number"]'])
+            dialpad = self._find_dial_input()
         if dialpad is None:
             return False
 
@@ -68,9 +69,9 @@ class GoogleVoiceController:
     def hangup(self) -> bool:
         hangup_button = self._query_first(
             [
+                '[gv-test-id="in-call-end-call"]',
                 'button[aria-label*="End call"]',
                 'button[aria-label*="Hang up"]',
-                'button[aria-label*="End"]',
             ]
         )
         if hangup_button is None:
@@ -85,6 +86,7 @@ class GoogleVoiceController:
     def is_call_active(self) -> bool:
         return self._query_first(
             [
+                '[gv-test-id="in-call-end-call"]',
                 'button[aria-label*="End call"]',
                 'button[aria-label*="Hang up"]',
             ]
@@ -96,8 +98,8 @@ class GoogleVoiceController:
     def ensure_keypad_visible(self) -> None:
         show_keypad = self._query_first(
             [
+                '[gv-test-id="keypad-button"]',
                 'button[aria-label*="Show keypad"]',
-                'button:has-text("Show keypad")',
             ]
         )
         if show_keypad is not None:
@@ -110,6 +112,39 @@ class GoogleVoiceController:
         self._playwright = None
         self._browser = None
         self._page = None
+
+    def _dismiss_overlays(self) -> None:
+        """Close any notification overlays that might block interaction."""
+        for _ in range(3):
+            close_btn = self._query_first(
+                [
+                    '.cdk-overlay-container button[aria-label*="Close"]',
+                    '.cdk-overlay-container button[aria-label*="关闭"]',
+                    '.cdk-overlay-container button[aria-label*="Dismiss"]',
+                ]
+            )
+            if close_btn is None:
+                break
+            try:
+                close_btn.click()
+                time.sleep(0.3)
+            except Exception:
+                break
+
+    def _find_dial_input(self) -> Any | None:
+        # Language-agnostic: find the input inside the dial panel custom element
+        panel = self._query_first(
+            [
+                'gv-make-call-panel input[type="text"]',
+                'gv-call-sidebar input[type="text"]',
+            ]
+        )
+        if panel is not None:
+            return panel
+        # Fallback: match by placeholder (English)
+        return self._query_first(
+            ['input[placeholder="Enter a name or number"]']
+        )
 
     def _find_or_open_voice_page(self) -> Any:
         assert self._browser is not None
@@ -129,8 +164,9 @@ class GoogleVoiceController:
     def _open_calls_view(self) -> None:
         calls_button = self._query_first(
             [
+                '[gv-test-id="sidenav-calls"]',
                 'button[aria-label="Calls"]',
-                '[gv-icon-button="call"]',
+                'a[aria-label="Calls"]',
             ]
         )
         if calls_button is not None:
