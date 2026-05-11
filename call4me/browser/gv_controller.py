@@ -2,29 +2,41 @@ from __future__ import annotations
 
 import sys
 import time
+from builtins import input as builtin_input
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from call4me.config import BrowserConfig
+from call4me.browser.shared_chromium import ensure_shared_chromium
 
 
 @dataclass
 class GoogleVoiceController:
     config: BrowserConfig
-    _playwright: Any | None = None
-    _browser: Any | None = None
+    _crystal: Any | None = None
+    _browser_handle: Any | None = None
     _page: Any | None = None
 
     def connect(self) -> None:
-        sync_playwright = self._load_playwright()
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.connect_over_cdp(
-            self.config.cdp_url,
-            timeout=self.config.timeout_ms,
+        shared_browser = ensure_shared_chromium(self.config)
+        Crystal = self._load_crystal()
+        self._crystal = Crystal(
+            proxy=self.config.proxy,
+            mode="headed",
+            auto_upgrade=False,
+            timeout_ms=self.config.timeout_ms,
+            use_persistent_profile=False,
+            profile_root=self.config.chromium_profile_root,
+            profile_name=self.config.chromium_profile_name,
+            cdp_url=shared_browser.cdp_url,
         )
-        self._page = self._find_or_open_voice_page()
+        self._browser_handle = self._crystal.connect(mode="headed", create_page=False)
+        self._page = self._browser_handle.find_page("voice.google.com")
+        if self._page is None:
+            self._page = self._browser_handle.new_page()
         self._page.set_default_timeout(self.config.timeout_ms)
+        self._ensure_ready_page()
 
     @property
     def page(self) -> Any:
@@ -45,9 +57,6 @@ class GoogleVoiceController:
         time.sleep(0.2)
         dialpad.fill(phone_number)
         time.sleep(1.0)
-
-        # Press Enter to dial the number we typed — avoids clicking
-        # on suggestion buttons like "Call Air Canada" from call history.
         dialpad.press("Enter")
         return True
 
@@ -63,7 +72,6 @@ class GoogleVoiceController:
         if key is not None:
             key.click()
         else:
-            # Fallback to pure keyboard press
             self.page.keyboard.press(digit)
 
     def hangup(self) -> bool:
@@ -79,7 +87,6 @@ class GoogleVoiceController:
         try:
             hangup_button.click()
         except Exception:
-            # The other side may have already hung up
             return False
         return True
 
@@ -107,14 +114,16 @@ class GoogleVoiceController:
             time.sleep(0.3)
 
     def close(self) -> None:
-        if self._playwright is not None:
-            self._playwright.stop()
-        self._playwright = None
-        self._browser = None
+        if self._browser_handle is not None:
+            try:
+                self._browser_handle.close()
+            except Exception:
+                pass
+        self._crystal = None
+        self._browser_handle = None
         self._page = None
 
     def _dismiss_overlays(self) -> None:
-        """Close any notification overlays that might block interaction."""
         for _ in range(3):
             close_btn = self._query_first(
                 [
@@ -131,8 +140,48 @@ class GoogleVoiceController:
             except Exception:
                 break
 
+    def _ensure_calls_page(self) -> None:
+        if "/calls" in self.page.url:
+            return
+        self.page.goto(self.config.voice_url, wait_until="domcontentloaded")
+        time.sleep(1.0)
+
+    def _ensure_ready_page(self) -> None:
+        self._ensure_calls_page()
+        if self._find_dial_input() is not None:
+            return
+        self._open_calls_view()
+        if self._find_dial_input() is not None:
+            return
+        self._wait_for_manual_login()
+
+    def _wait_for_manual_login(self) -> None:
+        if not self.config.prompt_for_manual_login:
+            raise RuntimeError("Google Voice is open but not ready for calls; manual login is required")
+        if not self._can_prompt_for_login():
+            raise RuntimeError(
+                "Google Voice is open but not ready for calls; "
+                "run call4me from a tty so it can wait for manual login"
+            )
+
+        for _ in range(3):
+            prompt = (
+                "\nGoogle Voice browser is open but not ready for calls.\n"
+                f"Current page: {self.page.url}\n"
+                "Please finish login in the opened browser window, then press Enter here to continue..."
+            )
+            try:
+                self._prompt_for_enter(prompt)
+            except (EOFError, KeyboardInterrupt) as exc:
+                raise RuntimeError("Cancelled while waiting for Google Voice login") from exc
+            self._ensure_calls_page()
+            self._open_calls_view()
+            if self._find_dial_input() is not None:
+                return
+
+        raise RuntimeError("Google Voice is still not ready for calls after manual login")
+
     def _find_dial_input(self) -> Any | None:
-        # Language-agnostic: find the input inside the dial panel custom element
         panel = self._query_first(
             [
                 'gv-make-call-panel input[type="text"]',
@@ -141,25 +190,7 @@ class GoogleVoiceController:
         )
         if panel is not None:
             return panel
-        # Fallback: match by placeholder (English)
-        return self._query_first(
-            ['input[placeholder="Enter a name or number"]']
-        )
-
-    def _find_or_open_voice_page(self) -> Any:
-        assert self._browser is not None
-        for context in self._browser.contexts:
-            for page in context.pages:
-                if "voice.google.com" in page.url:
-                    if "/calls" not in page.url:
-                        page.goto(self.config.voice_url, wait_until="domcontentloaded")
-                    return page
-
-        context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(self.config.voice_url, wait_until="domcontentloaded")
-        time.sleep(2.0)
-        return page
+        return self._query_first(['input[placeholder="Enter a name or number"]'])
 
     def _open_calls_view(self) -> None:
         calls_button = self._query_first(
@@ -183,13 +214,21 @@ class GoogleVoiceController:
                 return node
         return None
 
-    def _load_playwright(self):
-        openclaw_path = Path(self.config.openclaw_tool_path)
-        if openclaw_path.exists():
-            sys.path.insert(0, str(openclaw_path))
-
+    def _can_prompt_for_login(self) -> bool:
         try:
-            from patchright.sync_api import sync_playwright  # type: ignore
-        except ImportError:
-            from playwright.sync_api import sync_playwright  # type: ignore
-        return sync_playwright
+            return bool(sys.stdin.isatty())
+        except Exception:
+            return False
+
+    def _prompt_for_enter(self, prompt: str) -> str:
+        return builtin_input(prompt)
+
+    def _load_crystal(self):
+        crystal_path = Path(self.config.crystal_cdp_path)
+        if crystal_path.exists():
+            path_value = str(crystal_path)
+            if path_value not in sys.path:
+                sys.path.insert(0, path_value)
+        from crystal_cdp import Crystal  # type: ignore
+
+        return Crystal

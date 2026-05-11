@@ -51,10 +51,18 @@ class LLMConfig:
 
 @dataclass(slots=True)
 class BrowserConfig:
-    cdp_url: str = "http://127.0.0.1:9222"
     voice_url: str = "https://voice.google.com/u/0/calls"
     timeout_ms: int = 30000
-    openclaw_tool_path: str = "/home/ubuntu/scripts/openclaw-tool"
+    crystal_cdp_path: str = "/home/ubuntu/scripts/crystalCDP"
+    proxy: str = "direct"
+    use_persistent_profile: bool = True
+    chromium_profile_root: str = "~/.config/chromium"
+    chromium_profile_name: str = "Default"
+    shared_browser_cdp_url: str = "http://127.0.0.1:9222"
+    chromium_executable: str = ""
+    chromium_display: str = ":1"
+    chromium_startup_timeout_sec: float = 15.0
+    prompt_for_manual_login: bool = True
 
 
 @dataclass(slots=True)

@@ -41,10 +41,18 @@ planner_llm:
   stream: false
 
 browser:
-  cdp_url: http://127.0.0.1:9222
   voice_url: https://voice.google.com/u/0/calls
   timeout_ms: 30000
-  openclaw_tool_path: /home/ubuntu/scripts/openclaw-tool
+  crystal_cdp_path: /home/ubuntu/scripts/crystalCDP
+  proxy: direct
+  use_persistent_profile: true
+  chromium_profile_root: ~/.config/chromium
+  chromium_profile_name: Default
+  shared_browser_cdp_url: http://127.0.0.1:9222
+  chromium_executable: ""
+  chromium_display: :1
+  chromium_startup_timeout_sec: 15.0
+  prompt_for_manual_login: true
 
 agent:
   max_duration_sec: 1800
